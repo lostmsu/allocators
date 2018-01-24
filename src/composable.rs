@@ -1,5 +1,6 @@
 //! This module contains some composable building blocks to build allocator chains.
 
+use std::heap::{AllocErr, Layout};
 use super::{Allocator, Error, Block, BlockOwner};
 
 /// This allocator always fails.
@@ -8,11 +9,11 @@ pub struct NullAllocator;
 
 unsafe impl Allocator for NullAllocator {
     unsafe fn allocate_raw(&self, _size: usize, _align: usize) -> Result<Block, Error> {
-        Err(Error::OutOfMemory)
+        Err(AllocErr::Exhausted{request: Layout::from_size_align(_size, _align).unwrap() })
     }
 
     unsafe fn reallocate_raw<'a>(&'a self, block: Block<'a>, _new_size: usize) -> Result<Block<'a>, (Error, Block<'a>)> {
-        Err((Error::OutOfMemory, block))
+        Err((AllocErr::Exhausted{request: Layout::from_size_align(_new_size, block.align()).unwrap()}, block))
     }
 
     unsafe fn deallocate_raw(&self, _block: Block) {
@@ -58,7 +59,7 @@ unsafe impl<M: BlockOwner, F: BlockOwner> Allocator for Fallback<M, F> {
         } else if self.fallback.owns_block(&block) {
             self.fallback.reallocate_raw(block, new_size)
         } else {
-            Err((Error::AllocatorSpecific("Neither fallback nor main owns this block.".into()), block))
+            Err((Error::invalid_input("Neither fallback nor main owns this block.".into()), block))
         }
     }
 
@@ -127,7 +128,7 @@ unsafe impl<A: Allocator, L: ProxyLogger> Allocator for Proxy<A, L> {
     }
 
     unsafe fn reallocate_raw<'a>(&'a self, block: Block<'a>, new_size: usize) -> Result<Block<'a>, (Error, Block<'a>)> {
-        let old_copy = Block::new(block.ptr(), block.size(), block.align());
+        let old_copy = Block::new(block.ptr(), block.layout());
 
         match self.alloc.reallocate_raw(block, new_size) {
             Ok(new_block) => {

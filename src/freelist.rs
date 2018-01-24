@@ -1,6 +1,7 @@
 //! A Free List allocator.
 
 use std::cell::Cell;
+use std::heap::AllocErr;
 use std::mem;
 use std::ptr;
 
@@ -29,7 +30,7 @@ impl<'a, A: 'a + Allocator> FreeList<'a, A> {
                     num_blocks: usize)
                     -> Result<Self, Error> {
         if block_size < mem::size_of::<*mut u8>() {
-            return Err(Error::AllocatorSpecific("Block size too small.".into()));
+            return Err(Error::invalid_input("Block size too small.".into()));
         }
 
         let mut free_list = ptr::null_mut();

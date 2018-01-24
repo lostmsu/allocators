@@ -38,24 +38,20 @@
 //! ```
 
 #![feature(
-    alloc,
+    allocator_api,
     coerce_unsized,
     heap_api,
     placement_new_protocol,
     placement_in_syntax,
+    ptr_internals,
     raw,
     unique,
     unsize,
 )]
 
-use std::error::Error as StdError;
-use std::fmt;
+use std::heap::{Alloc, Layout, System as SystemHeap};
 use std::marker::PhantomData;
 use std::ptr::Unique;
-
-use alloc::heap;
-
-extern crate alloc;
 
 mod boxed;
 pub mod composable;
@@ -168,8 +164,7 @@ pub trait BlockOwner: Allocator {
 /// A block of memory created by an allocator.
 pub struct Block<'a> {
     ptr: Unique<u8>,
-    size: usize,
-    align: usize,
+    layout: Layout,
     _marker: PhantomData<&'a [u8]>,
 }
 
@@ -179,12 +174,11 @@ impl<'a> Block<'a> {
     ///
     /// # Panics
     /// Panics if the pointer passed is null.
-    pub fn new(ptr: *mut u8, size: usize, align: usize) -> Self {
+    pub fn new(ptr: *mut u8, layout: Layout) -> Self {
         assert!(!ptr.is_null());
         Block {
-            ptr: unsafe { Unique::new(ptr) },
-            size: size,
-            align: align,
+            ptr: unsafe { Unique::new(ptr).unwrap() },
+            layout: layout,
             _marker: PhantomData,
         }
     }
@@ -193,8 +187,7 @@ impl<'a> Block<'a> {
     pub fn empty() -> Self {
         Block {
             ptr: Unique::empty(),
-            size: 0,
-            align: 0,
+            layout: Layout::from_size_align(0,0).unwrap(),
             _marker: PhantomData,
         }
     }
@@ -205,53 +198,24 @@ impl<'a> Block<'a> {
     }
     /// Get the size of this block.
     pub fn size(&self) -> usize {
-        self.size
+        self.layout.size()
+    }
+    pub fn layout(&self) -> Layout {
+        self.layout
     }
     /// Get the align of this block.
     pub fn align(&self) -> usize {
-        self.align
+        self.layout.align()
     }
     /// Whether this block is empty.
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.size() == 0
     }
 }
 
 /// Errors that can occur while creating an allocator
 /// or allocating from it.
-#[derive(Debug, Eq, PartialEq)]
-pub enum Error {
-    /// The allocator failed to allocate the amount of memory requested of it.
-    OutOfMemory,
-    /// The allocator does not support the requested alignment.
-    UnsupportedAlignment,
-    /// An allocator-specific error message.
-    AllocatorSpecific(String),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str(self.description())
-    }
-}
-
-impl StdError for Error {
-    fn description(&self) -> &str {
-        use Error::*;
-
-        match *self {
-            OutOfMemory => {
-                "Allocator out of memory."
-            }
-            UnsupportedAlignment => {
-                "Attempted to allocate with unsupported alignment."
-            }
-            AllocatorSpecific(ref reason) => {
-                reason
-            }
-        }
-    }
-}
+type Error = std::heap::AllocErr;
 
 /// Allocator stub that just forwards to heap allocation.
 /// It is recommended to use the `HEAP` constant instead
@@ -260,6 +224,7 @@ impl StdError for Error {
 #[derive(Debug)]
 pub struct HeapAllocator;
 
+static mut SYSTEM_HEAP: &'static SystemHeap = &SystemHeap;
 // A constant for allocators to use the heap as a root.
 // Values allocated with this are effectively `Box`es.
 pub const HEAP: &'static HeapAllocator = &HeapAllocator;
@@ -267,15 +232,16 @@ pub const HEAP: &'static HeapAllocator = &HeapAllocator;
 unsafe impl Allocator for HeapAllocator {
     #[inline]
     unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        if size != 0 {
-            let ptr = heap::allocate(size, align);
-            if !ptr.is_null() {
-                Ok(Block::new(ptr, size, align))
-            } else {
-                Err(Error::OutOfMemory)
+        let layout = std::heap::Layout::from_size_align(size, align);
+        match layout {
+            Some(layout) => {
+                if size != 0 {
+                    SYSTEM_HEAP.alloc(layout).map(|ptr| Block::new(ptr, layout))
+                } else {
+                    Ok(Block::empty())
+                }
             }
-        } else {
-            Ok(Block::empty())
+            None => Err(Error::invalid_input("Unsupported alignment"))
         }
     }
 
@@ -285,14 +251,14 @@ unsafe impl Allocator for HeapAllocator {
             self.deallocate_raw(block);
             Ok(Block::empty())
         } else if block.is_empty() {
-            Err((Error::UnsupportedAlignment, block))
+            Err((Error::invalid_input("Can't reallocate empty block"), block))
         } else {
-            let new_ptr = heap::reallocate(block.ptr(), block.size(), new_size, block.align());
-
-            if new_ptr.is_null() {
-                Err((Error::OutOfMemory, block))
-            } else {
-                Ok(Block::new(new_ptr, new_size, block.align()))
+            match Layout::from_size_align(new_size, block.align()) {
+                Some(new_layout) =>
+                    SYSTEM_HEAP.realloc(block.ptr(), block.layout(), new_layout)
+                        .map(|new_ptr| Block::new(new_ptr, new_layout))
+                        .map_err(|e| (e, block)),
+                None => Err((Error::invalid_input("Unsupported layout"), block))
             }
         }
     }
@@ -300,7 +266,7 @@ unsafe impl Allocator for HeapAllocator {
     #[inline]
     unsafe fn deallocate_raw(&self, block: Block) {
         if !block.is_empty() {
-            heap::deallocate(block.ptr(), block.size(), block.align())
+            SYSTEM_HEAP.dealloc(block.ptr(), block.layout())
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::borrow::{Borrow, BorrowMut};
+use std::heap::Layout;
 use std::marker::{PhantomData, Unsize};
 use std::mem;
 use std::ops::{CoerceUnsized, Deref, DerefMut, InPlace, Placer};
@@ -11,8 +12,7 @@ use super::{Allocator, Block};
 /// An item allocated by a custom allocator.
 pub struct AllocBox<'a, T: 'a + ?Sized, A: 'a + ?Sized + Allocator> {
     item: Unique<T>,
-    size: usize,
-    align: usize,
+    layout: Layout,
     allocator: &'a A,
 }
 
@@ -20,7 +20,7 @@ impl<'a, T: ?Sized, A: ?Sized + Allocator> AllocBox<'a, T, A> {
     /// Consumes this allocated value, yielding the value it manages.
     pub fn take(self) -> T where T: Sized {
         let val = unsafe { ::std::ptr::read(self.item.as_ptr()) };
-        let block = Block::new(self.item.as_ptr() as *mut u8, self.size, self.align);
+        let block = Block::new(self.item.as_ptr() as *mut u8, self.layout);
         unsafe { self.allocator.deallocate_raw(block) };
         mem::forget(self);
         val
@@ -28,7 +28,7 @@ impl<'a, T: ?Sized, A: ?Sized + Allocator> AllocBox<'a, T, A> {
 
     /// Gets a handle to the block of memory this manages.
     pub unsafe fn as_block(&self) -> Block {
-        Block::new(self.item.as_ptr() as *mut u8, self.size, self.align)
+        Block::new(self.item.as_ptr() as *mut u8, self.layout)
     }
 }
 
@@ -56,9 +56,8 @@ impl<'a, A: ?Sized + Allocator> AllocBox<'a, Any, A> {
         if self.is::<T>() {
             let obj: TraitObject = unsafe { mem::transmute::<*mut Any, TraitObject>(self.item.as_ptr()) };
             let new_allocated = AllocBox {
-                item: unsafe { Unique::new(obj.data as *mut T) },
-                size: self.size,
-                align: self.align,
+                item: unsafe { Unique::new(obj.data as *mut T).unwrap() },
+                layout: self.layout,
                 allocator: self.allocator,
             };
             mem::forget(self);
@@ -87,7 +86,7 @@ impl<'a, T: ?Sized, A: ?Sized + Allocator> Drop for AllocBox<'a, T, A> {
         use std::intrinsics::drop_in_place;
         unsafe {
             drop_in_place(self.item.as_ptr());
-            self.allocator.deallocate_raw(Block::new(self.item.as_ptr() as *mut u8, self.size, self.align));
+            self.allocator.deallocate_raw(Block::new(self.item.as_ptr() as *mut u8, self.layout));
         }
 
     }
@@ -128,9 +127,8 @@ impl<'a, T: 'a, A: 'a + ?Sized + Allocator> InPlace<T> for Place<'a, T, A> {
     type Owner = AllocBox<'a, T, A>;
     unsafe fn finalize(self) -> Self::Owner {
         let allocated = AllocBox {
-            item: Unique::new(self.block.ptr() as *mut T),
-            size: self.block.size(),
-            align: self.block.align(),
+            item: Unique::new(self.block.ptr() as *mut T).unwrap(),
+            layout: self.block.layout(),
             allocator: self.allocator,
         };
 
