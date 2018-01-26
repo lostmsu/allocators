@@ -1,28 +1,28 @@
 //! A Free List allocator.
 
 use std::cell::Cell;
-use std::heap::AllocErr;
+use std::heap::{Alloc, AllocErr, Layout};
 use std::mem;
 use std::ptr;
 
-use super::{Allocator, Error, Block, HeapAllocator, HEAP};
+use super::{Error, Block, SYSTEM_HEAP};
 
 /// A `FreeList` allocator manages a list of free memory blocks of uniform size.
 /// Whenever a block is requested, it returns the first free block.
-pub struct FreeList<'a, A: 'a + Allocator> {
+pub struct FreeList<'a, A: 'a + Alloc> {
     alloc: &'a A,
     block_size: usize,
     free_list: Cell<*mut u8>,
 }
 
-impl FreeList<'static, HeapAllocator> {
+impl FreeList<'static, std::heap::Heap> {
     /// Creates a new `FreeList` backed by the heap. `block_size` must be greater
     /// than or equal to the size of a pointer.
     pub fn new(block_size: usize, num_blocks: usize) -> Result<Self, Error> {
-        FreeList::new_from(HEAP, block_size, num_blocks)
+        FreeList::new_from(SYSTEM_HEAP, block_size, num_blocks)
     }
 }
-impl<'a, A: 'a + Allocator> FreeList<'a, A> {
+impl<'a, A: 'a + Alloc> FreeList<'a, A> {
     /// Creates a new `FreeList` backed by another allocator. `block_size` must be greater
     /// than or equal to the size of a pointer.
     pub fn new_from(alloc: &'a A,
@@ -35,14 +35,14 @@ impl<'a, A: 'a + Allocator> FreeList<'a, A> {
 
         let mut free_list = ptr::null_mut();
 
+        let block_layout = Layout::from_size_align(block_size, mem::align_of::<*mut u8>());
         // allocate each block with maximal alignment.
         for _ in 0..num_blocks {
-
-            match unsafe { alloc.allocate_raw(block_size, mem::align_of::<*mut u8>()) } {
-                Ok(block) => {
-                    let ptr: *mut *mut u8 = block.ptr() as *mut *mut u8;
+            match unsafe { alloc.alloc(block_layout) } {
+                Ok(ptr) => {
+                    let ptr: *mut *mut u8 = ptr as *mut *mut u8;
                     unsafe { *ptr = free_list }
-                    free_list = block.ptr();
+                    free_list = ptr;
                 }
                 Err(err) => {
                     // destructor cleans up after us.
@@ -65,12 +65,12 @@ impl<'a, A: 'a + Allocator> FreeList<'a, A> {
     }
 }
 
-unsafe impl<'a, A: 'a + Allocator> Allocator for FreeList<'a, A> {
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        if size == 0 {
-            return Ok(Block::empty());
+unsafe impl<'a, A: 'a + Alloc> Alloc for FreeList<'a, A> {
+    unsafe fn alloc(&self, layout: Layout) -> Result<*mut u8, Error> {
+        if layout.size() == 0 {
+            return Err(AllocErr::invalid_input("Can't allocate 0 bytes"));
         } else if size > self.block_size {
-            return Err(Error::OutOfMemory);
+            return Err(Error::invalid_input("Allocation must be within block size"));
         }
 
         if align > mem::align_of::<*mut u8>() {
@@ -82,51 +82,37 @@ unsafe impl<'a, A: 'a + Allocator> Allocator for FreeList<'a, A> {
             let next_block = *(free_list as *mut *mut u8);
             self.free_list.set(next_block);
 
-            Ok(Block::new(free_list, size, align))
+            Ok(free_list)
         } else {
             Err(Error::OutOfMemory)
         }
     }
 
-    unsafe fn reallocate_raw<'b>(&'b self, block: Block<'b>, new_size: usize) -> Result<Block<'b>, (Error, Block<'b>)> {
-        if new_size == 0 {
-            Ok(Block::empty())
-        } else if block.is_empty() {
-            Err((Error::UnsupportedAlignment, block))
-        } else if new_size <= self.block_size {
-            Ok(Block::new(block.ptr(), new_size, block.align()))
-        } else {
-            Err((Error::OutOfMemory, block))
-        }
-    }
-
-    unsafe fn deallocate_raw(&self, block: Block) {
-        if !block.is_empty() {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if layout.size() != 0 {
             let first = self.free_list.get();
-            let ptr = block.ptr();
             *(ptr as *mut *mut u8) = first;
             self.free_list.set(ptr);
         }
     }
 }
 
-impl<'a, A: 'a + Allocator> Drop for FreeList<'a, A> {
+impl<'a, A: 'a + Alloc> Drop for FreeList<'a, A> {
     fn drop(&mut self) {
         let mut free_list = self.free_list.get();
+        let block_layout = Layout::from_size_align(block_size, mem::align_of::<*mut u8>());
         //free all the blocks in the list.
         while !free_list.is_null() {
             unsafe {
                 let next = *(free_list as *mut *mut u8);
-                self.alloc.deallocate_raw(Block::new(free_list,
-                                                     self.block_size,
-                                                     mem::align_of::<*mut u8>()));
+                self.alloc.dealloc(free_list,block_layout);
                 free_list = next;
             }
         }
     }
 }
 
-unsafe impl<'a, A: 'a + Allocator + Sync> Send for FreeList<'a, A> {}
+unsafe impl<'a, A: 'a + Alloc + Sync> Send for FreeList<'a, A> {}
 
 #[cfg(test)]
 mod tests {

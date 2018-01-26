@@ -49,7 +49,7 @@
     unsize,
 )]
 
-use std::heap::{Alloc, Layout, System as SystemHeap};
+use std::heap::{Alloc, Layout, Heap};
 use std::marker::PhantomData;
 use std::ptr::Unique;
 
@@ -63,92 +63,15 @@ pub use composable::*;
 pub use freelist::FreeList;
 pub use scoped::Scoped;
 
-/// A custom memory allocator.
-pub unsafe trait Allocator {
-    /// Attempts to allocate the value supplied to it.
-    ///
-    /// # Examples
-    /// ```rust
-    /// use allocators::{Allocator, AllocBox};
-    /// fn alloc_array<A: Allocator>(allocator: &A) -> AllocBox<[u8; 1000], A> {
-    ///     allocator.allocate([0; 1000]).ok().unwrap()
-    /// }
-    /// ```
-    #[inline]
-    fn allocate<T>(&self, val: T) -> Result<AllocBox<T, Self>, (Error, T)>
-    where Self: Sized
-    {
-        match self.make_place() {
-            Ok(place) => {
-                Ok(in place { val })
-            }
-            Err(err) => {
-                Err((err, val))
-            }
-        }
-    }
-
-    /// Attempts to create a place to allocate into.
-    /// For the general purpose, calling `allocate` on the allocator is enough.
-    /// However, when you know the value you are allocating is too large
-    /// to be constructed on the stack, you should use in-place allocation.
-    /// 
-    /// # Examples
-    /// ```rust
-    /// #![feature(placement_in_syntax)]
-    /// use allocators::{Allocator, AllocBox};
-    /// fn alloc_array<A: Allocator>(allocator: &A) -> AllocBox<[u8; 1000], A> {
-    ///     // if 1000 bytes were enough to smash the stack, this would still work.
-    ///     in allocator.make_place().unwrap() { [0; 1000] }
-    /// }
-    /// ```
-    fn make_place<T>(&self) -> Result<Place<T, Self>, Error>
-    where Self: Sized
-    {
-        boxed::make_place(self)
-    }
-    
-    /// Attempt to allocate a block of memory.
-    ///
-    /// Returns either a block of memory allocated
-    /// or an Error. If `size` is equal to 0, the block returned must
-    /// be created by `Block::empty()`
-    ///
-    /// # Safety
-    /// Never use the block's pointer outside of the lifetime of the allocator.
-    /// It must be deallocated with the same allocator as it was allocated with.
-    /// It is undefined behavior to provide a non power-of-two align.
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error>;
-
-    /// Reallocate a block of memory.
-    ///
-    /// This either returns a new, possibly moved block with the requested size,
-    /// or the old block back.
-    /// The new block will have the same alignment as the old.
-    ///
-    /// # Safety
-    /// If given an empty block, it must return it back instead of allocating the new size,
-    /// since the alignment is unknown.
-    ///
-    /// If the requested size is 0, it must deallocate the old block and return an empty one.
-    unsafe fn reallocate_raw<'a>(&'a self, block: Block<'a>, new_size: usize) -> Result<Block<'a>, (Error, Block<'a>)>;
-
-    /// Deallocate the memory referred to by this block.
-    ///
-    /// # Safety
-    /// This block must have been allocated by this allocator.
-    unsafe fn deallocate_raw(&self, block: Block);
-}
-
 /// An allocator that knows which blocks have been issued by it.
-pub trait BlockOwner: Allocator {
+pub trait BlockOwner: Alloc {
     /// Whether this allocator owns this allocated value. 
-    fn owns<'a, T, A: Allocator>(&self, val: &AllocBox<'a, T, A>) -> bool {
+    fn owns<'a, T, A: Alloc>(&self, val: &AllocBox<'a, T, A>) -> bool {
         self.owns_block(& unsafe { val.as_block() })
     }
 
     /// Whether this allocator owns the block passed to it.
-    fn owns_block(&self, block: &Block) -> bool;
+    fn owns_block(&self, ptr: *mut u8, layout: Layout) -> bool;
 
     /// Joins this allocator with a fallback allocator.
     // TODO: Maybe not the right place for this?
@@ -217,108 +140,12 @@ impl<'a> Block<'a> {
 /// or allocating from it.
 type Error = std::heap::AllocErr;
 
-/// Allocator stub that just forwards to heap allocation.
-/// It is recommended to use the `HEAP` constant instead
-/// of creating a new instance of this, to benefit from
-/// the static lifetime that it provides.
-#[derive(Debug)]
-pub struct HeapAllocator;
-
-static mut SYSTEM_HEAP: &'static SystemHeap = &SystemHeap;
-// A constant for allocators to use the heap as a root.
-// Values allocated with this are effectively `Box`es.
-pub const HEAP: &'static HeapAllocator = &HeapAllocator;
-
-unsafe impl Allocator for HeapAllocator {
-    #[inline]
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        let layout = std::heap::Layout::from_size_align(size, align);
-        match layout {
-            Some(layout) => {
-                if size != 0 {
-                    SYSTEM_HEAP.alloc(layout).map(|ptr| Block::new(ptr, layout))
-                } else {
-                    Ok(Block::empty())
-                }
-            }
-            None => Err(Error::invalid_input("Unsupported alignment"))
-        }
-    }
-
-    #[inline]
-    unsafe fn reallocate_raw<'a>(&'a self, block: Block<'a>, new_size: usize) -> Result<Block<'a>, (Error, Block<'a>)> {
-        if new_size == 0 {
-            self.deallocate_raw(block);
-            Ok(Block::empty())
-        } else if block.is_empty() {
-            Err((Error::invalid_input("Can't reallocate empty block"), block))
-        } else {
-            match Layout::from_size_align(new_size, block.align()) {
-                Some(new_layout) =>
-                    SYSTEM_HEAP.realloc(block.ptr(), block.layout(), new_layout)
-                        .map(|new_ptr| Block::new(new_ptr, new_layout))
-                        .map_err(|e| (e, block)),
-                None => Err((Error::invalid_input("Unsupported layout"), block))
-            }
-        }
-    }
-
-    #[inline]
-    unsafe fn deallocate_raw(&self, block: Block) {
-        if !block.is_empty() {
-            SYSTEM_HEAP.dealloc(block.ptr(), block.layout())
-        }
-    }
-}
+static mut SYSTEM_HEAP: &'static Heap = &Heap::default();
 
 // aligns a pointer forward to the next value aligned with `align`.
 #[inline]
 fn align_forward(ptr: *mut u8, align: usize) -> *mut u8 {
     ((ptr as usize + align - 1) & !(align - 1)) as *mut u8
-}
-
-// implementations for trait object types.
-
-unsafe impl<'a, A: ?Sized + Allocator + 'a> Allocator for Box<A> {
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        (**self).allocate_raw(size, align)
-    }
-
-    unsafe fn reallocate_raw<'b>(&'b self, block: Block<'b>, new_size: usize) -> Result<Block<'b>, (Error, Block<'b>)> {
-        (**self).reallocate_raw(block, new_size)
-    }
-
-    unsafe fn deallocate_raw(&self, block: Block) {
-        (**self).deallocate_raw(block)
-    }
-}
-
-unsafe impl<'a, 'b: 'a, A: ?Sized + Allocator + 'b> Allocator for &'a A {
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        (**self).allocate_raw(size, align)
-    }
-
-    unsafe fn reallocate_raw<'c>(&'c self, block: Block<'c>, new_size: usize) -> Result<Block<'c>, (Error, Block<'c>)> {
-        (**self).reallocate_raw(block, new_size)
-    }
-
-    unsafe fn deallocate_raw(&self, block: Block) {
-        (**self).deallocate_raw(block)
-    }
-}
-
-unsafe impl<'a, 'b: 'a, A: ?Sized + Allocator + 'b> Allocator for &'a mut A {
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
-        (**self).allocate_raw(size, align)
-    }
-
-    unsafe fn reallocate_raw<'c>(&'c self, block: Block<'c>, new_size: usize) -> Result<Block<'c>, (Error, Block<'c>)> {
-        (**self).reallocate_raw(block, new_size)
-    }
-
-    unsafe fn deallocate_raw(&self, block: Block) {
-        (**self).deallocate_raw(block)
-    }
 }
 
 #[cfg(test)]

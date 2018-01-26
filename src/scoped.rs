@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::mem;
 use std::ptr;
 
-use super::{Allocator, Error, Block, BlockOwner, HeapAllocator, HEAP};
+use super::{Error, Block, BlockOwner, SYSTEM_HEAP};
 
 /// A scoped linear allocator.
 pub struct Scoped<'parent, A: 'parent + Allocator> {
