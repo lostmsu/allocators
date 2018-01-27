@@ -49,7 +49,7 @@
     unsize,
 )]
 
-use std::heap::{Alloc, Layout, Heap};
+use std::heap::{Alloc, AllocErr, Layout, Heap};
 use std::marker::PhantomData;
 use std::ptr::Unique;
 
@@ -67,7 +67,7 @@ pub use scoped::Scoped;
 pub trait BlockOwner: Alloc {
     /// Whether this allocator owns this allocated value. 
     fn owns<'a, T, A: Alloc>(&self, val: &AllocBox<'a, T, A>) -> bool {
-        self.owns_block(& unsafe { val.as_block() })
+        self.owns_block(val.as_ptr() as *mut u8, val.layout())
     }
 
     /// Whether this allocator owns the block passed to it.
@@ -138,7 +138,12 @@ impl<'a> Block<'a> {
 
 /// Errors that can occur while creating an allocator
 /// or allocating from it.
-type Error = std::heap::AllocErr;
+pub struct Error{}
+
+impl Error {
+    pub fn unsupported_alignment() -> AllocErr { AllocErr::invalid_input("unsupported alignment") }
+    pub fn out_of_memory(request: Layout) -> AllocErr { AllocErr::Exhausted {request}}
+}
 
 static mut SYSTEM_HEAP: &'static Heap = &Heap::default();
 

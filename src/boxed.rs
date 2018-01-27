@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::borrow::{Borrow, BorrowMut};
-use std::heap::{Alloc, Layout};
+use std::heap::{Alloc, AllocErr, Layout};
 use std::marker::{PhantomData, Unsize};
 use std::mem;
 use std::ops::{CoerceUnsized, Deref, DerefMut, InPlace, Placer};
@@ -20,11 +20,13 @@ impl<'a, T: ?Sized, A: ?Sized + Alloc> AllocBox<'a, T, A> {
     /// Consumes this allocated value, yielding the value it manages.
     pub fn take(self) -> T where T: Sized {
         let val = unsafe { ::std::ptr::read(self.item.as_ptr()) };
-        let block = Block::new(self.item.as_ptr() as *mut u8, self.layout);
-        unsafe { self.allocator.deallocate_raw(block) };
+        unsafe { self.allocator.dealloc(self.as_ptr() as *mut u8, self.layout) };
         mem::forget(self);
         val
     }
+
+    pub fn as_ptr(&self) -> *mut T { self.item.as_ptr() }
+    pub fn layout(&self) -> Layout { self.layout }
 }
 
 impl<'a, T: ?Sized, A: ?Sized + Alloc> Deref for AllocBox<'a, T, A> {
@@ -81,20 +83,20 @@ impl<'a, T: ?Sized, A: ?Sized + Alloc> Drop for AllocBox<'a, T, A> {
         use std::intrinsics::drop_in_place;
         unsafe {
             drop_in_place(self.item.as_ptr());
-            self.allocator.deallocate_raw(Block::new(self.item.as_ptr() as *mut u8, self.layout));
+            self.allocator.dealloc(self.item.as_ptr() as *mut u8, self.layout);
         }
 
     }
 }
 
 
-pub fn make_place<A: ?Sized + Alloc, T>(alloc: &A) -> Result<Place<T, A>, super::Error> {
-    let (size, align) = (mem::size_of::<T>(), mem::align_of::<T>());
-    match unsafe { alloc.allocate_raw(size, align) } {
-        Ok(block) => {
+pub fn make_place<A: ?Sized + Alloc, T>(alloc: &mut A) -> Result<Place<T, A>, AllocErr> {
+    let layout = Layout::from_size_align(mem::size_of::<T>(), mem::align_of::<T>()).unwrap();
+    match unsafe { alloc.alloc(layout) } {
+        Ok(ptr) => {
             Ok(Place {
                 allocator: alloc,
-                block: block,
+                block: Block::new(ptr, layout),
                 _marker: PhantomData,
             })
         }
@@ -147,7 +149,8 @@ impl<'a, T: 'a, A: 'a + ?Sized + Alloc> Drop for Place<'a, T, A> {
         // to create the value failed and the memory at the
         // pointer is still uninitialized, which we don't want to drop.
         unsafe {
-            self.allocator.deallocate_raw(mem::replace(&mut self.block, Block::empty()));
+            let old_block = mem::replace(&mut self.block, Block::empty());
+            self.allocator.dealloc(old_block.ptr(), old_block.layout());
         }
 
     }

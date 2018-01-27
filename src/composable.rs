@@ -8,18 +8,18 @@ use super::{Error, BlockOwner};
 pub struct NullAllocator;
 
 unsafe impl Alloc for NullAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> Result<*mut u8, Error> {
-        Err(AllocErr::Exhausted{request: layout })
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
+        Err(Error::out_of_memory(layout))
     }
 
-    unsafe fn realloc<'a>(&'a self,
+    unsafe fn realloc<'a>(&'a mut self,
                           ptr: *mut u8,
                           layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
         Err(AllocErr::Exhausted{request: new_layout})
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
         panic!("Attempted to deallocate using null allocator.")
     }
 }
@@ -49,26 +49,26 @@ impl<M: BlockOwner, F: BlockOwner> Fallback<M, F> {
 }
 
 unsafe impl<M: BlockOwner, F: BlockOwner> Alloc for Fallback<M, F> {
-    unsafe fn alloc(&self, layout: Layout) -> Result<*mut u8, Error> {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
         match self.main.alloc(layout) {
             Ok(ptr) => Ok(ptr),
             Err(_) => self.fallback.alloc(layout),
         }
     }
 
-    unsafe fn realloc<'a>(&'a self, ptr: *mut u8,
+    unsafe fn realloc<'a>(&'a mut self, ptr: *mut u8,
                           layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
         if self.main.owns_block(ptr, layout) {
-            self.main.realloc(ptr, new_layout)
+            self.main.realloc(ptr, layout, new_layout)
         } else if self.fallback.owns_block(ptr, layout) {
-            self.fallback.realloc(ptr, layout)
+            self.fallback.realloc(ptr, layout, new_layout)
         } else {
-            Err(Error::invalid_input("Neither fallback nor main owns this block.".into()))
+            Err(AllocErr::invalid_input("Neither fallback nor main owns this block.".into()))
         }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
         if self.main.owns_block(ptr, layout) {
             self.main.dealloc(ptr, layout);
         } else if self.fallback.owns_block(ptr, layout) {
@@ -90,7 +90,7 @@ pub trait ProxyLogger {
     /// Called after a successful allocation.
     fn allocate_success(&self, ptr: *mut u8, layout: Layout);
     /// Called after a failed allocation.
-    fn allocate_fail(&self, err: &Error, layout: Layout);
+    fn allocate_fail(&self, err: &AllocErr, layout: Layout);
 
     /// Called when deallocating a block.
     fn deallocate(&self, ptr: *mut u8, layout: Layout);
@@ -98,7 +98,7 @@ pub trait ProxyLogger {
     /// Called after a successful reallocation.
     fn reallocate_success(&self, old_ptr: *mut u8, old_layout: Layout, new_ptr: *mut u8, new_layout: Layout);
     /// Called after a failed reallocation.
-    fn reallocate_fail(&self, err: &Error, ptr: *mut u8, layout: Layout, req_size: usize);
+    fn reallocate_fail(&self, err: &AllocErr, ptr: *mut u8, layout: Layout, req_size: usize);
 }
 
 /// This wraps an allocator and a logger, logging all allocations
@@ -119,7 +119,7 @@ impl<A: Alloc, L: ProxyLogger> Proxy<A, L> {
 }
 
 unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
-    unsafe fn alloc(&self, layout: Layout) -> Result<*mut u8, Error> {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
         match self.alloc.alloc(layout) {
             Ok(ptr) => {
                 self.logger.allocate_success(ptr, layout);
@@ -132,7 +132,7 @@ unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
         }
     }
 
-    unsafe fn realloc<'a>(&'a self, ptr: *mut u8,
+    unsafe fn realloc<'a>(&'a mut self, ptr: *mut u8,
                           layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
         match self.alloc.realloc(ptr, layout, new_layout) {
@@ -141,14 +141,14 @@ unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
                 Ok(new_ptr)
             }
             Err(err) => {
-                self.logger.reallocate_fail(&err, ptr, layout, new_layout);
+                self.logger.reallocate_fail(&err, ptr, layout, new_layout.size());
                 Err(err)
             }
         }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.logger.dealloc(ptr, layout);
+    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
+        self.logger.deallocate(ptr, layout);
         self.alloc.dealloc(ptr, layout);
     }
 }

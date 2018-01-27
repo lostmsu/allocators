@@ -2,13 +2,14 @@
 //! and a traditional linear allocator.
 
 use std::cell::Cell;
+use std::heap::{Alloc, AllocErr, Layout};
 use std::mem;
 use std::ptr;
 
-use super::{Error, Block, BlockOwner, SYSTEM_HEAP};
+use super::{Error, BlockOwner};
 
 /// A scoped linear allocator.
-pub struct Scoped<'parent, A: 'parent + Allocator> {
+pub struct Scoped<'parent, A: 'parent + Alloc> {
     allocator: &'parent A,
     current: Cell<*mut u8>,
     end: *mut u8,
@@ -16,24 +17,18 @@ pub struct Scoped<'parent, A: 'parent + Allocator> {
     start: *mut u8,
 }
 
-impl Scoped<'static, HeapAllocator> {
-    /// Creates a new `Scoped` backed by `size` bytes from the heap.
-    pub fn new(size: usize) -> Result<Self, Error> {
-        Scoped::new_from(HEAP, size)
-    }
-}
-
-impl<'parent, A: Allocator> Scoped<'parent, A> {
+impl<'parent, A: Alloc> Scoped<'parent, A> {
     /// Creates a new `Scoped` backed by `size` bytes from the allocator supplied.
-    pub fn new_from(alloc: &'parent A, size: usize) -> Result<Self, Error> {
+    pub fn new_from(alloc: &'parent A, size: usize) -> Result<Self, AllocErr> {
         // Create a memory buffer with the desired size and maximal align from the parent.
-        match unsafe { alloc.allocate_raw(size, mem::align_of::<usize>()) } {
-            Ok(block) => Ok(Scoped {
+        let initial_block_layout = Layout::from_size_align(size, mem::align_of::<usize>()).unwrap();
+        match unsafe { alloc.alloc(initial_block_layout) } {
+            Ok(ptr) => Ok(Scoped {
                 allocator: alloc,
-                current: Cell::new(block.ptr()),
-                end: unsafe { block.ptr().offset(block.size() as isize) },
+                current: Cell::new(ptr),
+                end: unsafe { ptr.offset(initial_block_layout.size() as isize) },
                 root: true,
-                start: block.ptr(),
+                start: ptr,
             }),
             Err(err) => Err(err),
         }
@@ -76,86 +71,86 @@ impl<'parent, A: Allocator> Scoped<'parent, A> {
     }
 }
 
-unsafe impl<'a, A: Allocator> Allocator for Scoped<'a, A> {
-    unsafe fn allocate_raw(&self, size: usize, align: usize) -> Result<Block, Error> {
+unsafe impl<'a, A: Alloc> Alloc for Scoped<'a, A> {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
         if self.is_scoped() {
-            return Err(Error::AllocatorSpecific("Called allocate on already scoped \
+            return Err(AllocErr::invalid_input("Called allocate on already scoped \
                                                           allocator."
                                                              .into()));
         }
 
-        if size == 0 {
-            return Ok(Block::empty());
+        if layout.size() == 0 {
+            return Err(AllocErr::invalid_input("Can't allocate 0"));
         }
 
         let current_ptr = self.current.get();
-        let aligned_ptr = super::align_forward(current_ptr, align);
-        let end_ptr = aligned_ptr.offset(size as isize);
+        let aligned_ptr = super::align_forward(current_ptr, layout.align());
+        let end_ptr = aligned_ptr.offset(layout.size() as isize);
 
         if end_ptr > self.end {
-            Err(Error::OutOfMemory)
+            Err(Error::out_of_memory(layout))
         } else {
             self.current.set(end_ptr);
-            Ok(Block::new(aligned_ptr, size, align))
+            Ok(aligned_ptr)
         }
     }
 
     /// Because of the way this allocator is designed, reallocating a block that is not 
     /// the most recent will lead to fragmentation.
-    unsafe fn reallocate_raw<'b>(&'b self, block: Block<'b>, new_size: usize) -> Result<Block<'b>, (Error, Block<'b>)> {
+    unsafe fn realloc<'b>(&'b mut self, ptr: *mut u8, layout: Layout, new_layout: Layout)
+                -> Result<*mut u8, AllocErr> {
         let current_ptr = self.current.get();
 
-        if new_size == 0 {
-            Ok(Block::empty())
-        } else if block.is_empty() {
-            Err((Error::UnsupportedAlignment, block))
-        } else if block.ptr().offset(block.size() as isize) == current_ptr {
+        if new_layout.size() == 0 {
+            Err(AllocErr::invalid_input("Can't allocate 0"))
+        } else if layout.align() == 0 {
+            Err(Error::unsupported_alignment())
+        } else if ptr.offset(layout.size() as isize) == current_ptr
+               && new_layout.align() <= layout.align()  {
             // if this block is the last allocated, resize it if we can.
             // otherwise, we are out of memory.
-            let new_cur = current_ptr.offset((new_size - block.size()) as isize);
+            let new_cur = current_ptr.offset((new_layout.size() - layout.size()) as isize);
             if new_cur < self.end {
                 self.current.set(new_cur);
-                Ok(Block::new(block.ptr(), new_size, block.align()))
+                Ok(ptr)
             } else {
-                Err((Error::OutOfMemory, block))
+                Err(Error::out_of_memory(new_layout))
             }
         } else {
             // try to allocate a new block at the end, and copy the old mem over.
             // this will lead to some fragmentation.
-            match self.allocate_raw(new_size, block.align()) {
-                Ok(new_block) => {
-                    ptr::copy_nonoverlapping(block.ptr(), new_block.ptr(), block.size());
-                    Ok(new_block)
+            match self.alloc(new_layout) {
+                Ok(new_ptr) => {
+                    ptr::copy_nonoverlapping(ptr, new_ptr, layout.size());
+                    Ok(new_ptr)
                 }
                 Err(err) => {
-                    Err((err, block))
+                    Err(err)
                 }
             }
         }
     }
 
-    unsafe fn deallocate_raw(&self, block: Block) {
-        if block.is_empty() || block.ptr().is_null() {
+    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
+        if layout.size() == 0 || ptr.is_null() {
             return;
         }
         // no op for this unless this is the last allocation.
         // The memory gets reused when the scope is cleared.
         let current_ptr = self.current.get();
-        if !self.is_scoped() && block.ptr().offset(block.size() as isize) == current_ptr {
-            self.current.set(block.ptr());
+        if !self.is_scoped() && ptr.offset(layout.size() as isize) == current_ptr {
+            self.current.set(ptr);
         }
     }
 }
 
-impl<'a, A: Allocator> BlockOwner for Scoped<'a, A> {
-    fn owns_block(&self, block: &Block) -> bool {
-        let ptr = block.ptr();
-
+impl<'a, A: Alloc> BlockOwner for Scoped<'a, A> {
+    fn owns_block(&self, ptr: *mut u8, layout: Layout) -> bool {
         ptr >= self.start && ptr <= self.end
     }
 }
 
-impl<'a, A: Allocator> Drop for Scoped<'a, A> {
+impl<'a, A: Alloc> Drop for Scoped<'a, A> {
     /// Drops the `Scoped`
     fn drop(&mut self) {
         let size = self.end as usize - self.start as usize;
@@ -163,15 +158,13 @@ impl<'a, A: Allocator> Drop for Scoped<'a, A> {
         // that memory is freed after destructors for allocated objects
         // are called in case of unwind
         if self.root && size > 0 {
-            unsafe {
-                self.allocator
-                    .deallocate_raw(Block::new(self.start, size, mem::align_of::<usize>()))
-            }
+            let self_layout = Layout::from_size_align(size, mem::align_of::<usize>()).unwrap();
+            unsafe { self.allocator.dealloc(self.start, self_layout) }
         }
     }
 }
 
-unsafe impl<'a, A: 'a + Allocator + Sync> Send for Scoped<'a, A> {}
+unsafe impl<'a, A: 'a + Alloc + Sync> Send for Scoped<'a, A> {}
 
 #[cfg(test)]
 mod tests {
@@ -208,7 +201,7 @@ mod tests {
         // allocate more memory than the allocator has.
         let alloc = Scoped::new(0).unwrap();
         let (err, _) = alloc.allocate(1i32).err().unwrap();
-        assert_eq!(err, Error::OutOfMemory);
+        assert_eq!(err, AllocErr::OutOfMemory);
     }
 
     #[test]
