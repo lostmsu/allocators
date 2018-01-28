@@ -38,7 +38,7 @@ impl<'a, A: 'a + Alloc> FreeList<'a, A> {
         let block_layout = Layout::from_size_align(block_size, mem::align_of::<*mut u8>()).unwrap();
         // allocate each block with maximal alignment.
         for _ in 0..num_blocks {
-            match unsafe { alloc.alloc(block_layout) } {
+            match unsafe { alloc.alloc(block_layout.clone()) } {
                 Ok(ptr) => {
                     let next_block_ptr: *mut *mut u8 = ptr as *mut *mut u8;
                     unsafe { *next_block_ptr = free_list }
@@ -105,7 +105,7 @@ impl<'a, A: 'a + Alloc> Drop for FreeList<'a, A> {
         while !free_list.is_null() {
             unsafe {
                 let next = *(free_list as *mut *mut u8);
-                self.alloc.dealloc(free_list,block_layout);
+                self.alloc.dealloc(free_list, block_layout.clone());
                 free_list = next;
             }
         }

@@ -10,7 +10,7 @@ use super::{Error, BlockOwner};
 
 /// A scoped linear allocator.
 pub struct Scoped<'parent, A: 'parent + Alloc> {
-    allocator: &'parent A,
+    allocator: &'parent mut A,
     current: Cell<*mut u8>,
     end: *mut u8,
     root: bool,
@@ -19,10 +19,10 @@ pub struct Scoped<'parent, A: 'parent + Alloc> {
 
 impl<'parent, A: Alloc> Scoped<'parent, A> {
     /// Creates a new `Scoped` backed by `size` bytes from the allocator supplied.
-    pub fn new_from(alloc: &'parent A, size: usize) -> Result<Self, AllocErr> {
+    pub fn new_from(alloc: &'parent mut A, size: usize) -> Result<Self, AllocErr> {
         // Create a memory buffer with the desired size and maximal align from the parent.
         let initial_block_layout = Layout::from_size_align(size, mem::align_of::<usize>()).unwrap();
-        match unsafe { alloc.alloc(initial_block_layout) } {
+        match unsafe { alloc.alloc(initial_block_layout.clone()) } {
             Ok(ptr) => Ok(Scoped {
                 allocator: alloc,
                 current: Cell::new(ptr),
@@ -38,7 +38,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
     ///
     /// Returns the result of the closure or an error if this allocator
     /// has already been scoped.
-    pub fn scope<F, U>(&self, f: F) -> Result<U, ()>
+    pub fn scope<F, U>(&'parent mut self, f: F) -> Result<U, ()>
         where F: FnMut(&Self) -> U
     {
         if self.is_scoped() {
@@ -46,6 +46,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
         }
 
         let mut f = f;
+
         let old = self.current.get();
         let alloc = Scoped {
             allocator: self.allocator,
@@ -62,6 +63,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
         self.current.set(old);
 
         mem::forget(alloc);
+
         Ok(u)
     }
 
@@ -145,7 +147,7 @@ unsafe impl<'a, A: Alloc> Alloc for Scoped<'a, A> {
 }
 
 impl<'a, A: Alloc> BlockOwner for Scoped<'a, A> {
-    fn owns_block(&self, ptr: *mut u8, layout: Layout) -> bool {
+    fn owns_block(&self, ptr: *mut u8, _layout: Layout) -> bool {
         ptr >= self.start && ptr <= self.end
     }
 }

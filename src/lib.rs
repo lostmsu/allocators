@@ -43,13 +43,14 @@
     heap_api,
     placement_new_protocol,
     placement_in_syntax,
+    pointer_methods,
     ptr_internals,
     raw,
     unique,
     unsize,
 )]
 
-use std::heap::{Alloc, AllocErr, Layout, Heap};
+use std::heap::{Alloc, AllocErr, Layout};
 use std::marker::PhantomData;
 use std::ptr::Unique;
 
@@ -100,7 +101,7 @@ impl<'a> Block<'a> {
     pub fn new(ptr: *mut u8, layout: Layout) -> Self {
         assert!(!ptr.is_null());
         Block {
-            ptr: unsafe { Unique::new(ptr).unwrap() },
+            ptr: Unique::new(ptr).unwrap(),
             layout: layout,
             _marker: PhantomData,
         }
@@ -124,7 +125,7 @@ impl<'a> Block<'a> {
         self.layout.size()
     }
     pub fn layout(&self) -> Layout {
-        self.layout
+        self.layout.clone()
     }
     /// Get the align of this block.
     pub fn align(&self) -> usize {
@@ -144,8 +145,6 @@ impl Error {
     pub fn unsupported_alignment() -> AllocErr { AllocErr::invalid_input("unsupported alignment") }
     pub fn out_of_memory(request: Layout) -> AllocErr { AllocErr::Exhausted {request}}
 }
-
-static mut SYSTEM_HEAP: &'static Heap = &Heap::default();
 
 // aligns a pointer forward to the next value aligned with `align`.
 #[inline]

@@ -13,19 +13,19 @@ unsafe impl Alloc for NullAllocator {
     }
 
     unsafe fn realloc<'a>(&'a mut self,
-                          ptr: *mut u8,
-                          layout: Layout,
+                          _ptr: *mut u8,
+                          _layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
         Err(AllocErr::Exhausted{request: new_layout})
     }
 
-    unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
+    unsafe fn dealloc(&mut self, _ptr: *mut u8, _layout: Layout) {
         panic!("Attempted to deallocate using null allocator.")
     }
 }
 
 impl BlockOwner for NullAllocator {
-    fn owns_block(&self, ptr: *mut u8, layout: Layout) -> bool {
+    fn owns_block(&self, _ptr: *mut u8, _layout: Layout) -> bool {
         false
     }
 }
@@ -50,28 +50,28 @@ impl<M: BlockOwner, F: BlockOwner> Fallback<M, F> {
 
 unsafe impl<M: BlockOwner, F: BlockOwner> Alloc for Fallback<M, F> {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
-        match self.main.alloc(layout) {
+        match self.main.alloc(layout.clone()) {
             Ok(ptr) => Ok(ptr),
-            Err(_) => self.fallback.alloc(layout),
+            Err(_) => self.fallback.alloc(layout.clone()),
         }
     }
 
     unsafe fn realloc<'a>(&'a mut self, ptr: *mut u8,
                           layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
-        if self.main.owns_block(ptr, layout) {
-            self.main.realloc(ptr, layout, new_layout)
-        } else if self.fallback.owns_block(ptr, layout) {
-            self.fallback.realloc(ptr, layout, new_layout)
+        if self.main.owns_block(ptr, layout.clone()) {
+            self.main.realloc(ptr, layout.clone(), new_layout)
+        } else if self.fallback.owns_block(ptr, layout.clone()) {
+            self.fallback.realloc(ptr, layout.clone(), new_layout)
         } else {
             Err(AllocErr::invalid_input("Neither fallback nor main owns this block.".into()))
         }
     }
 
     unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
-        if self.main.owns_block(ptr, layout) {
+        if self.main.owns_block(ptr, layout.clone()) {
             self.main.dealloc(ptr, layout);
-        } else if self.fallback.owns_block(ptr, layout) {
+        } else if self.fallback.owns_block(ptr, layout.clone()) {
             self.fallback.dealloc(ptr, layout);
         }
     }
@@ -79,7 +79,7 @@ unsafe impl<M: BlockOwner, F: BlockOwner> Alloc for Fallback<M, F> {
 
 impl<M: BlockOwner, F: BlockOwner> BlockOwner for Fallback<M, F> {
     fn owns_block(&self, ptr: *mut u8, layout: Layout) -> bool {
-        self.main.owns_block(ptr, layout) || self.fallback.owns_block(ptr, layout)
+        self.main.owns_block(ptr, layout.clone()) || self.fallback.owns_block(ptr, layout)
     }
 }
 
@@ -120,7 +120,7 @@ impl<A: Alloc, L: ProxyLogger> Proxy<A, L> {
 
 unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<*mut u8, AllocErr> {
-        match self.alloc.alloc(layout) {
+        match self.alloc.alloc(layout.clone()) {
             Ok(ptr) => {
                 self.logger.allocate_success(ptr, layout);
                 Ok(ptr)
@@ -135,7 +135,7 @@ unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
     unsafe fn realloc<'a>(&'a mut self, ptr: *mut u8,
                           layout: Layout,
                           new_layout: Layout) -> Result<*mut u8, AllocErr> {
-        match self.alloc.realloc(ptr, layout, new_layout) {
+        match self.alloc.realloc(ptr, layout.clone(), new_layout.clone()) {
             Ok(new_ptr) => {
                 self.logger.reallocate_success(ptr, layout, new_ptr, new_layout);
                 Ok(new_ptr)
@@ -148,7 +148,7 @@ unsafe impl<A: Alloc, L: ProxyLogger> Alloc for Proxy<A, L> {
     }
 
     unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
-        self.logger.deallocate(ptr, layout);
+        self.logger.deallocate(ptr, layout.clone());
         self.alloc.dealloc(ptr, layout);
     }
 }
