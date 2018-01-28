@@ -16,6 +16,15 @@ pub struct AllocBox<'a, T: 'a + ?Sized, A: 'a + ?Sized + Alloc> {
     allocator: &'a mut A,
 }
 
+pub fn allocate<'a, T, A: Alloc>(allocator: &'a mut A) -> AllocBox<'a, T, A> {
+    let layout = Layout::from_size_align(mem::size_of::<T>(), mem::align_of::<T>()).unwrap();
+    AllocBox{
+        item: Unique::from(allocator.alloc_one::<T>().unwrap()),
+        layout,
+        allocator,
+    }
+}
+
 impl<'a, T: ?Sized, A: ?Sized + Alloc> AllocBox<'a, T, A> {
     /// Consumes this allocated value, yielding the value it manages.
     pub fn take(self) -> T where T: Sized {
