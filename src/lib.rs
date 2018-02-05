@@ -50,7 +50,7 @@
     unsize,
 )]
 
-use std::heap::{Alloc, AllocErr, Layout};
+use std::heap::{Alloc, AllocErr, Heap, Layout};
 use std::marker::PhantomData;
 use std::ptr::Unique;
 
@@ -59,10 +59,15 @@ pub mod composable;
 pub mod freelist;
 pub mod scoped;
 
-pub use boxed::{AllocBox, Place};
+pub use boxed::{AllocBox, Place, make_place};
 pub use composable::*;
 pub use freelist::FreeList;
 pub use scoped::Scoped;
+
+#[inline]
+fn allocate<T,A: Alloc + ?Sized>(allocator: &mut A, val: T) -> Result<AllocBox<T, A>, AllocErr> {
+    make_place::<A, T>(allocator).map(|place| in place {val})
+}
 
 /// An allocator that knows which blocks have been issued by it.
 pub trait BlockOwner: Alloc {
@@ -163,14 +168,14 @@ mod tests {
     fn heap_lifetime() {
         let my_int;
         {
-            my_int = HEAP.allocate(0i32).unwrap();
+            my_int = Unique::from(Heap::default().alloc_one::<i32>().unwrap());
         }
 
-        assert_eq!(*my_int, 0);
+        assert_eq!(*my_int.as_ref(), 0);
     }
     #[test]
     fn heap_in_place() {
-        let big = in HEAP.make_place().unwrap() { [0u8; 8_000_000] };
+        let big = in make_place(&mut Heap::default()).unwrap() { [0u8; 8_000_000] };
         assert_eq!(big.len(), 8_000_000);
     }
 
@@ -184,13 +189,13 @@ mod tests {
             }
         }
 
-        let my_foo: AllocBox<Any, _> = HEAP.allocate(Bomb).unwrap();
+        let my_foo: AllocBox<Any, _> = boxed::allocate::<Bomb, _>(&mut Heap::default());
         let _: AllocBox<Bomb, _> = my_foo.downcast().ok().unwrap();
     }
 
     #[test]
     fn take_out() {
-        let _: [u8; 1024] = HEAP.allocate([0; 1024]).ok().unwrap().take();
+        let _: [u8; 1024] = allocate(&mut Heap::default(), [0; 1024]).ok().unwrap().take();
     }
 
     #[test]
@@ -204,9 +209,9 @@ mod tests {
         }
 
         let mut i = 0;
-        let alloc: Box<Allocator> = Box::new(HEAP);
+        let mut alloc: Box<Alloc> = Box::new(Heap::default());
         {
-            let _ = alloc.allocate(Increment(&mut i)).unwrap();
+            let _ = allocate(&mut *alloc, Increment(&mut i)).unwrap();
         }
         assert_eq!(i, 1);
     }

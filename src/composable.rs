@@ -160,7 +160,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn null_allocate() {
-        let alloc = NullAllocator;
-        alloc.allocate(1i32).unwrap();
+        let mut alloc = NullAllocator;
+        allocate(&mut alloc, 1i32).unwrap();
     }
 }

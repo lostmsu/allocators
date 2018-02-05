@@ -120,13 +120,13 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let alloc = FreeList::new(1024, 64).ok().unwrap();
+        let mut alloc = FreeList::new_from(&mut Heap::default(), 1024, 64).ok().unwrap();
         let mut blocks = Vec::new();
         for _ in 0..64 {
-            blocks.push(alloc.allocate([0u8; 1024]).ok().unwrap());
+            blocks.push(allocate(&mut alloc, [0u8; 1024]).ok().unwrap());
         }
-        assert!(alloc.allocate([0u8; 1024]).is_err());
+        assert!(allocate(&mut alloc, [0u8; 1024]).is_err());
         drop(blocks);
-        assert!(alloc.allocate([0u8; 1024]).is_ok());
+        assert!(allocate(&mut alloc, [0u8; 1024]).is_ok());
     }
 }

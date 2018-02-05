@@ -39,7 +39,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
     /// Returns the result of the closure or an error if this allocator
     /// has already been scoped.
     pub fn scope<F, U>(&'parent mut self, f: F) -> Result<U, ()>
-        where F: FnMut(&Self) -> U
+        where F: FnMut(&mut Self) -> U
     {
         if self.is_scoped() {
             return Err(());
@@ -48,7 +48,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
         let mut f = f;
 
         let old = self.current.get();
-        let alloc = Scoped {
+        let mut alloc = Scoped {
             allocator: self.allocator,
             current: self.current.clone(),
             end: self.end,
@@ -59,7 +59,7 @@ impl<'parent, A: Alloc> Scoped<'parent, A> {
         // set the current pointer to null as a flag to indicate
         // that this allocator is being scoped.
         self.current.set(ptr::null_mut());
-        let u = f(&alloc);
+        let u = f(&mut alloc);
         self.current.set(old);
 
         mem::forget(alloc);
@@ -171,27 +171,27 @@ unsafe impl<'a, A: 'a + Alloc + Sync> Send for Scoped<'a, A> {}
 #[cfg(test)]
 mod tests {
     use super::super::*;
-
-    #[test]
-    #[should_panic]
-    fn use_outer() {
-        let alloc = Scoped::new(4).unwrap();
-        let mut outer_val = alloc.allocate(0i32).unwrap();
-        alloc.scope(|_inner| {
-            // using outer allocator is dangerous and should fail.
-                 outer_val = alloc.allocate(1i32).unwrap();
-             })
-             .unwrap();
-    }
+// TODO use_outer is now covered by borrow checker?
+//    #[test]
+//    #[should_panic]
+//    fn use_outer() {
+//        let alloc = &mut Scoped::new_from(&mut Heap::default(), 4).unwrap();
+//        let mut outer_val = allocate(alloc, 0i32).unwrap();
+//        alloc.scope(|_inner| {
+//            // using outer allocator is dangerous and should fail.
+//                 outer_val = allocate(alloc, 1i32).unwrap();
+//             })
+//             .unwrap();
+//    }
 
     #[test]
     fn scope_scope() {
-        let alloc = Scoped::new(64).unwrap();
-        let _ = alloc.allocate(0).unwrap();
+        let alloc = &mut Scoped::new_from(&mut Heap::default(), 64).unwrap();
+        let _ = allocate(alloc, 0).unwrap();
         alloc.scope(|inner| {
-                 let _ = inner.allocate(32);
+                 let _ = allocate(inner, 32).unwrap();
                  inner.scope(|bottom| {
-                          let _ = bottom.allocate(23);
+                          let _ = allocate(bottom, 23).unwrap();
                       })
                       .unwrap();
              })
@@ -232,7 +232,7 @@ mod tests {
     fn mutex_sharing() {
         use std::thread;
         use std::sync::{Arc, Mutex};
-        let alloc = Scoped::new(64).unwrap();
+        let alloc = Scoped::new_from(&mut Heap::default(), 64).unwrap();
         let data = Arc::new(Mutex::new(alloc));
         for i in 0..10 {
             let data = data.clone();
