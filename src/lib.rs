@@ -67,7 +67,7 @@ pub use scoped::Scoped;
 /// An allocator that knows which blocks have been issued by it.
 pub trait BlockOwner: Alloc {
     /// Whether this allocator owns this allocated value. 
-    fn owns<'a, T, A: Alloc>(&self, val: &AllocBox<'a, T, A>) -> bool {
+    fn owns<T, A: Alloc>(&self, val: &AllocBox<T, A>) -> bool {
         self.owns_block(val.as_ptr() as *mut u8, val.layout())
     }
 
@@ -86,13 +86,12 @@ pub trait BlockOwner: Alloc {
 }
 
 /// A block of memory created by an allocator.
-pub struct Block<'a> {
+pub struct Block {
     ptr: Unique<u8>,
     layout: Layout,
-    _marker: PhantomData<&'a [u8]>,
 }
 
-impl<'a> Block<'a> {
+impl Block {
     /// Create a new block from the supplied parts.
     /// The pointer cannot be null.
     ///
@@ -103,7 +102,6 @@ impl<'a> Block<'a> {
         Block {
             ptr: Unique::new(ptr).unwrap(),
             layout: layout,
-            _marker: PhantomData,
         }
     }
 
@@ -112,7 +110,6 @@ impl<'a> Block<'a> {
         Block {
             ptr: Unique::empty(),
             layout: Layout::from_size_align(0,0).unwrap(),
-            _marker: PhantomData,
         }
     }
 

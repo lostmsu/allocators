@@ -1,36 +1,38 @@
 use std::any::Any;
 use std::borrow::{Borrow, BorrowMut};
+use std::cell::RefCell;
 use std::heap::{Alloc, AllocErr, Layout};
 use std::marker::{PhantomData, Unsize};
 use std::mem;
 use std::ops::{CoerceUnsized, Deref, DerefMut, InPlace, Placer};
 use std::ops::Place as StdPlace;
 use std::ptr::Unique;
+use std::rc::Rc;
 
 use super::Block;
 
 /// An item allocated by a custom allocator.
-pub struct AllocBox<'a, T: 'a + ?Sized, A: 'a + ?Sized + Alloc> {
-    item: Unique<T>,
+pub struct AllocBox<T: ?Sized, A: ?Sized + Alloc> {
+    item: Option<Unique<T>>,
     layout: Layout,
-    allocator: &'a mut A,
+    allocator: Rc<RefCell<A>>,
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> AllocBox<T, A> {
     /// Consumes this allocated value, yielding the value it manages.
     pub fn take(self) -> T where T: Sized {
-        let val = unsafe { ::std::ptr::read(self.item.as_ptr()) };
+        let item_ptr = self.item.take().unwrap();
+        let val = unsafe { ::std::ptr::read(item_ptr.as_ptr()) };
         let ptr = self.as_ptr() as *mut u8;
-        unsafe { self.allocator.dealloc(ptr, self.layout.clone()) };
-        mem::forget(self);
+        unsafe { self.allocator.borrow_mut().dealloc(ptr, self.layout.clone()) };
         val
     }
 
-    pub fn as_ptr(&self) -> *mut T { self.item.as_ptr() }
+    pub fn as_ptr(&self) -> *mut T { self.item.unwrap().as_ptr() }
     pub fn layout(&self) -> Layout { self.layout.clone() }
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> Deref for AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> Deref for AllocBox<T, A> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -38,18 +40,18 @@ impl<'a, T: ?Sized, A: ?Sized + Alloc> Deref for AllocBox<'a, T, A> {
     }
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> DerefMut for AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> DerefMut for AllocBox<T, A> {
     fn deref_mut(&mut self) -> &mut T {
         unsafe { self.item.as_mut() }
     }
 }
 
 // AllocBox can store trait objects!
-impl<'a, T: ?Sized + Unsize<U>, U: ?Sized, A: ?Sized + Alloc> CoerceUnsized<AllocBox<'a, U, A>> for AllocBox<'a, T, A> {}
+// impl<T: ?Sized + Unsize<U>, U: ?Sized, A: ?Sized + Alloc> CoerceUnsized<AllocBox<U, A>> for AllocBox<T, A> {}
 
-impl<'a, A: ?Sized + Alloc> AllocBox<'a, Any, A> {
+impl<A: ?Sized + Alloc> AllocBox<Any, A> {
     /// Attempts to downcast this `AllocBox` to a concrete type.
-    pub fn downcast<T: Any>(self) -> Result<AllocBox<'a, T, A>, AllocBox<'a, Any, A>> where A: Sized {
+    pub fn downcast<T: Any>(self) -> Result<AllocBox<T, A>, AllocBox<Any, A>> where A: Sized {
         use std::raw::TraitObject;
         if self.is::<T>() {
             let obj: TraitObject = unsafe { mem::transmute::<*mut Any, TraitObject>(self.item.as_ptr()) };
@@ -66,27 +68,29 @@ impl<'a, A: ?Sized + Alloc> AllocBox<'a, Any, A> {
     }
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> Borrow<T> for AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> Borrow<T> for AllocBox<T, A> {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> BorrowMut<T> for AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> BorrowMut<T> for AllocBox<T, A> {
     fn borrow_mut(&mut self) -> &mut T {
         &mut **self
     }
 }
 
-impl<'a, T: ?Sized, A: ?Sized + Alloc> Drop for AllocBox<'a, T, A> {
+impl<T: ?Sized, A: ?Sized + Alloc> Drop for AllocBox<T, A> {
     #[inline]
     fn drop(&mut self) {
+        match self.item { }
         use std::intrinsics::drop_in_place;
-        unsafe {
-            drop_in_place(self.item.as_ptr());
-            self.allocator.dealloc(self.item.as_ptr() as *mut u8, self.layout.clone());
-        }
-
+        self.item.map(|item| {
+            unsafe {
+                drop_in_place(self.item.as_ptr());
+                self.allocator.dealloc(self.item.as_ptr() as *mut u8, self.layout.clone());
+            }
+        });
     }
 }
 
@@ -108,21 +112,21 @@ pub fn make_place<A: ?Sized + Alloc, T>(alloc: &mut A) -> Result<Place<T, A>, Al
 /// A place for allocating into.
 /// This is only used for in-place allocation,
 /// e.g. `let val = in (alloc.make_place().unwrap()) { EXPR }`
-pub struct Place<'a, T: 'a, A: 'a + ?Sized + Alloc> {
-    allocator: &'a mut A,
-    block: Block<'a>,
+pub struct Place<T, A: ?Sized + Alloc> {
+    allocator: Rc<RefCell<A>>,
+    block: Block,
     _marker: PhantomData<T>,
 }
 
-impl<'a, T: 'a, A: 'a + ?Sized + Alloc> Placer<T> for Place<'a, T, A> {
+impl<T, A: ?Sized + Alloc> Placer<T> for Place<T, A> {
     type Place = Self;
     fn make_place(self) -> Self {
         self
     }
 }
 
-impl<'a, T: 'a, A: 'a + ?Sized + Alloc> InPlace<T> for Place<'a, T, A> {
-    type Owner = AllocBox<'a, T, A>;
+impl<T, A: ?Sized + Alloc> InPlace<T> for Place<T, A> {
+    type Owner = AllocBox<T, A>;
     unsafe fn finalize(self) -> Self::Owner {
         let allocated = AllocBox {
             item: Unique::new(self.block.ptr() as *mut T).unwrap(),
@@ -135,13 +139,13 @@ impl<'a, T: 'a, A: 'a + ?Sized + Alloc> InPlace<T> for Place<'a, T, A> {
     }
 }
 
-impl<'a, T: 'a, A: 'a + ?Sized + Alloc> StdPlace<T> for Place<'a, T, A> {
+impl<T, A: ?Sized + Alloc> StdPlace<T> for Place<T, A> {
     fn pointer(&mut self) -> *mut T {
         self.block.ptr() as *mut T
     }
 }
 
-impl<'a, T: 'a, A: 'a + ?Sized + Alloc> Drop for Place<'a, T, A> {
+impl<T, A: ?Sized + Alloc> Drop for Place<T, A> {
     #[inline]
     fn drop(&mut self) {
         // almost identical to AllocBox::Drop, but we don't drop
